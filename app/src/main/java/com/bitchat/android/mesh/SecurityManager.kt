@@ -19,10 +19,10 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
     
     companion object {
         private const val TAG = "SecurityManager"
-        private const val MESSAGE_TIMEOUT = 300000L // 5 minutes (same as iOS)
-        private const val CLEANUP_INTERVAL = 300000L // 5 minutes
-        private const val MAX_PROCESSED_MESSAGES = 10000
-        private const val MAX_PROCESSED_KEY_EXCHANGES = 1000
+        private const val MESSAGE_TIMEOUT = com.bitchat.android.util.AppConstants.Security.MESSAGE_TIMEOUT_MS // 5 minutes (same as iOS)
+        private const val CLEANUP_INTERVAL = com.bitchat.android.util.AppConstants.Security.CLEANUP_INTERVAL_MS // 5 minutes
+        private const val MAX_PROCESSED_MESSAGES = com.bitchat.android.util.AppConstants.Security.MAX_PROCESSED_MESSAGES
+        private const val MAX_PROCESSED_KEY_EXCHANGES = com.bitchat.android.util.AppConstants.Security.MAX_PROCESSED_KEY_EXCHANGES
     }
     
     // Security tracking
@@ -50,32 +50,24 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
             return false
         }
         
-        // Validate packet payload
-        if (packet.payload.isEmpty()) {
-            Log.d(TAG, "Dropping packet with empty payload")
-            return false
-        }
-        
         // Replay attack protection (same 5-minute window as iOS)
         val currentTime = System.currentTimeMillis()
-        val packetTime = packet.timestamp.toLong()
-        val timeDiff = kotlin.math.abs(currentTime - packetTime)
-        
-//        if (timeDiff > MESSAGE_TIMEOUT) {
-//            Log.d(TAG, "Dropping old packet from $peerID, time diff: ${timeDiff/1000}s")
-//            return false
-//        }
+        val messageType = MessageType.fromValue(packet.type)
 
         // Duplicate detection
         val messageID = generateMessageID(packet, peerID)
-        if (processedMessages.contains(messageID)) {
-            Log.d(TAG, "Dropping duplicate packet: $messageID")
-            return false
+        if (messageType != MessageType.ANNOUNCE) {
+            if (processedMessages.contains(messageID)) {
+                Log.d(TAG, "Dropping duplicate packet: $messageID")
+                return false
+            }
+            // Add to processed messages
+            processedMessages.add(messageID)
+            messageTimestamps[messageID] = currentTime
+        } else {
+            // Do not deduplicate ANNOUNCE at the security layer.
+            // They are signed/idempotent and we need to ensure first-announce per-connection can bind.
         }
-        
-        // Add to processed messages
-        processedMessages.add(messageID)
-        messageTimestamps[messageID] = currentTime
         
         // NEW: Signature verification logging (not rejecting yet)
         verifyPacketSignatureWithLogging(packet, peerID)
