@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.livedata.observeAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -28,9 +27,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bitchat.android.core.ui.utils.singleOrTripleClickable
-import com.bitchat.android.geohash.LocationChannelManager.PermissionState
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.Offset
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
  * Header components for ChatScreen
@@ -38,28 +37,14 @@ import androidx.compose.ui.geometry.Offset
  */
 
 
-/**
- * Reactive helper to compute favorite state from fingerprint mapping
- * This eliminates the need for static isFavorite parameters and makes
- * the UI reactive to fingerprint manager changes
- */
-@Composable
-fun isFavoriteReactive(
-    peerID: String,
-    peerFingerprints: Map<String, String>,
-    favoritePeers: Set<String>
-): Boolean {
-    return remember(peerID, peerFingerprints, favoritePeers) {
-        val fingerprint = peerFingerprints[peerID]
-        fingerprint != null && favoritePeers.contains(fingerprint)
-    }
-}
+
 
 @Composable
 fun TorStatusDot(
     modifier: Modifier = Modifier
 ) {
-    val torStatus by com.bitchat.android.net.TorManager.statusFlow.collectAsState()
+    val torProvider = remember { com.bitchat.android.net.ArtiTorManager.getInstance() }
+    val torStatus by torProvider.statusFlow.collectAsState()
     
     if (torStatus.mode != com.bitchat.android.net.TorMode.OFF) {
         val dotColor = when {
@@ -246,39 +231,6 @@ fun ChatHeaderContent(
     val colorScheme = MaterialTheme.colorScheme
 
     when {
-        selectedPrivatePeer != null -> {
-            // Private chat header - Fully reactive state tracking
-            val favoritePeers by viewModel.favoritePeers.observeAsState(emptySet())
-            val peerFingerprints by viewModel.peerFingerprints.observeAsState(emptyMap())
-            val peerSessionStates by viewModel.peerSessionStates.observeAsState(emptyMap())
-            val peerNicknames by viewModel.peerNicknames.observeAsState(emptyMap())
-            
-            // Reactive favorite computation - no more static lookups!
-            val isFavorite = isFavoriteReactive(
-                peerID = selectedPrivatePeer,
-                peerFingerprints = peerFingerprints,
-                favoritePeers = favoritePeers
-            )
-            val sessionState = peerSessionStates[selectedPrivatePeer]
-            
-            Log.d("ChatHeader", "Header recomposing: peer=$selectedPrivatePeer, isFav=$isFavorite, sessionState=$sessionState")
-            
-            // Pass geohash context and people for NIP-17 chat title formatting
-            val selectedLocationChannel by viewModel.selectedLocationChannel.observeAsState()
-            val geohashPeople by viewModel.geohashPeople.observeAsState(emptyList())
-
-            PrivateChatHeader(
-                peerID = selectedPrivatePeer,
-                peerNicknames = peerNicknames,
-                isFavorite = isFavorite,
-                sessionState = sessionState,
-                selectedLocationChannel = selectedLocationChannel,
-                geohashPeople = geohashPeople,
-                onBackClick = onBackClick,
-                onToggleFavorite = { viewModel.toggleFavorite(selectedPrivatePeer) },
-                viewModel = viewModel
-            )
-        }
         currentChannel != null -> {
             // Channel header
             ChannelHeader(
@@ -304,148 +256,7 @@ fun ChatHeaderContent(
     }
 }
 
-@Composable
-private fun PrivateChatHeader(
-    peerID: String,
-    peerNicknames: Map<String, String>,
-    isFavorite: Boolean,
-    sessionState: String?,
-    selectedLocationChannel: com.bitchat.android.geohash.ChannelID?,
-    geohashPeople: List<GeoPerson>,
-    onBackClick: () -> Unit,
-    onToggleFavorite: () -> Unit,
-    viewModel: ChatViewModel
-) {
-    val colorScheme = MaterialTheme.colorScheme
-    val isNostrDM = peerID.startsWith("nostr_") || peerID.startsWith("nostr:")
-    // Determine mutual favorite state for this peer (supports mesh ephemeral 16-hex via favorites lookup)
-    val isMutualFavorite = remember(peerID, peerNicknames) {
-        try {
-            if (isNostrDM) return@remember false
-            if (peerID.length == 64 && peerID.matches(Regex("^[0-9a-fA-F]+$"))) {
-                val noiseKeyBytes = peerID.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(noiseKeyBytes)?.isMutual == true
-            } else if (peerID.length == 16 && peerID.matches(Regex("^[0-9a-fA-F]+$"))) {
-                com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(peerID)?.isMutual == true
-            } else false
-        } catch (_: Exception) { false }
-    }
 
-    // Compute title text: for NIP-17 chats show "#geohash/@username" (iOS parity)
-    val titleText: String = if (isNostrDM) {
-        // For geohash DMs, get the actual source geohash and proper display name
-        val (conversationGeohash, baseName) = try {
-            val repoField = com.bitchat.android.ui.GeohashViewModel::class.java.getDeclaredField("repo")
-            repoField.isAccessible = true
-            val repo = repoField.get(viewModel.geohashViewModel) as com.bitchat.android.nostr.GeohashRepository
-            val gh = repo.getConversationGeohash(peerID) ?: "geohash"
-            val fullPubkey = com.bitchat.android.nostr.GeohashAliasRegistry.get(peerID) ?: ""
-            val displayName = if (fullPubkey.isNotEmpty()) {
-                repo.displayNameForGeohashConversation(fullPubkey, gh)
-            } else {
-                peerNicknames[peerID] ?: "unknown"
-            }
-            Pair(gh, displayName)
-        } catch (e: Exception) { 
-            Pair("geohash", peerNicknames[peerID] ?: "unknown")
-        }
-        
-        "#$conversationGeohash/@$baseName"
-    } else {
-        // Prefer live mesh nickname; fallback to favorites nickname (supports 16-hex), finally short key
-        peerNicknames[peerID] ?: run {
-            val titleFromFavorites = try {
-                if (peerID.length == 64 && peerID.matches(Regex("^[0-9a-fA-F]+$"))) {
-                    val noiseKeyBytes = peerID.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                    com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(noiseKeyBytes)?.peerNickname
-                } else if (peerID.length == 16 && peerID.matches(Regex("^[0-9a-fA-F]+$"))) {
-                    com.bitchat.android.favorites.FavoritesPersistenceService.shared.getFavoriteStatus(peerID)?.peerNickname
-                } else null
-            } catch (_: Exception) { null }
-            titleFromFavorites ?: peerID.take(12)
-        }
-    }
-    
-    Box(modifier = Modifier.fillMaxWidth()) {
-        // Back button - positioned all the way to the left with minimal margin
-        Button(
-            onClick = onBackClick,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.Transparent,
-                contentColor = colorScheme.primary
-            ),
-            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp), // Reduced horizontal padding
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .offset(x = (-8).dp) // Move even further left to minimize margin
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.ArrowBack,
-                    contentDescription = stringResource(R.string.back),
-                    modifier = Modifier.size(16.dp),
-                    tint = colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = stringResource(R.string.chat_back),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colorScheme.primary
-                )
-            }
-        }
-        
-        // Title - perfectly centered regardless of other elements
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.align(Alignment.Center)
-        ) {
-            
-            Text(
-                text = titleText,
-                style = MaterialTheme.typography.titleMedium,
-                color = Color(0xFFFF9500) // Orange
-            )
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            // Show a globe when chatting via Nostr alias, or when mesh session not established but mutual favorite exists
-            val showGlobe = isNostrDM || (sessionState != "established" && isMutualFavorite)
-            if (showGlobe) {
-                Icon(
-                    imageVector = Icons.Outlined.Public,
-                contentDescription = stringResource(R.string.cd_nostr_reachable),
-                    modifier = Modifier.size(14.dp),
-                    tint = Color(0xFF9B59B6) // Purple like iOS
-                )
-            } else {
-                NoiseSessionIcon(
-                    sessionState = sessionState,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-
-        }
-        
-        // Favorite button - positioned on the right
-        IconButton(
-            onClick = {
-                Log.d("ChatHeader", "Header toggle favorite: peerID=$peerID, currentFavorite=$isFavorite")
-                onToggleFavorite()
-            },
-            modifier = Modifier.align(Alignment.CenterEnd)
-        ) {
-            Icon(
-                imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
-                contentDescription = if (isFavorite) stringResource(R.string.cd_remove_favorite) else stringResource(R.string.cd_add_favorite),
-                modifier = Modifier.size(18.dp), // Slightly larger than sidebar icon
-                tint = if (isFavorite) Color(0xFFFFD700) else Color(0x87878700) // Yellow or grey
-            )
-        }
-    }
-}
 
 @Composable
 private fun ChannelHeader(
@@ -523,18 +334,18 @@ private fun MainHeader(
     viewModel: ChatViewModel
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val connectedPeers by viewModel.connectedPeers.observeAsState(emptyList())
-    val joinedChannels by viewModel.joinedChannels.observeAsState(emptySet())
-    val hasUnreadChannels by viewModel.unreadChannelMessages.observeAsState(emptyMap())
-    val hasUnreadPrivateMessages by viewModel.unreadPrivateMessages.observeAsState(emptySet())
-    val isConnected by viewModel.isConnected.observeAsState(false)
-    val selectedLocationChannel by viewModel.selectedLocationChannel.observeAsState()
-    val geohashPeople by viewModel.geohashPeople.observeAsState(emptyList())
+    val connectedPeers by viewModel.connectedPeers.collectAsStateWithLifecycle()
+    val joinedChannels by viewModel.joinedChannels.collectAsStateWithLifecycle()
+    val hasUnreadChannels by viewModel.unreadChannelMessages.collectAsStateWithLifecycle()
+    val hasUnreadPrivateMessages by viewModel.unreadPrivateMessages.collectAsStateWithLifecycle()
+    val isConnected by viewModel.isConnected.collectAsStateWithLifecycle()
+    val selectedLocationChannel by viewModel.selectedLocationChannel.collectAsStateWithLifecycle()
+    val geohashPeople by viewModel.geohashPeople.collectAsStateWithLifecycle()
 
     // Bookmarks store for current geohash toggle (iOS parity)
     val context = androidx.compose.ui.platform.LocalContext.current
     val bookmarksStore = remember { com.bitchat.android.geohash.GeohashBookmarksStore.getInstance(context) }
-    val bookmarks by bookmarksStore.bookmarks.observeAsState(emptyList())
+    val bookmarks by bookmarksStore.bookmarks.collectAsStateWithLifecycle()
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -653,8 +464,8 @@ private fun LocationChannelsButton(
     val colorScheme = MaterialTheme.colorScheme
     
     // Get current channel selection from location manager
-    val selectedChannel by viewModel.selectedLocationChannel.observeAsState()
-    val teleported by viewModel.isTeleported.observeAsState(false)
+    val selectedChannel by viewModel.selectedLocationChannel.collectAsStateWithLifecycle()
+    val teleported by viewModel.isTeleported.collectAsStateWithLifecycle()
     
     val (badgeText, badgeColor) = when (selectedChannel) {
         is com.bitchat.android.geohash.ChannelID.Mesh -> {

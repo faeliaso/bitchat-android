@@ -4,7 +4,6 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,7 +17,6 @@ import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.livedata.observeAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
@@ -38,7 +36,11 @@ import com.bitchat.android.geohash.LocationChannelManager
 import com.bitchat.android.geohash.GeohashBookmarksStore
 import com.bitchat.android.ui.theme.BASE_FONT_SIZE
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bitchat.android.R
+import com.bitchat.android.core.ui.component.sheet.BitchatBottomSheet
+import com.bitchat.android.core.ui.component.sheet.BitchatSheetTopBar
+import com.bitchat.android.core.ui.component.sheet.BitchatSheetTitle
 
 /**
  * Location Channels Sheet for selecting geohash-based location channels
@@ -57,18 +59,20 @@ fun LocationChannelsSheet(
     val bookmarksStore = remember { GeohashBookmarksStore.getInstance(context) }
 
     // Observe location manager state
-    val permissionState by locationManager.permissionState.observeAsState()
-    val availableChannels by locationManager.availableChannels.observeAsState(emptyList())
-    val selectedChannel by locationManager.selectedChannel.observeAsState()
-    val locationNames by locationManager.locationNames.observeAsState(emptyMap())
-    val locationServicesEnabled by locationManager.locationServicesEnabled.observeAsState(false)
+    val permissionState by locationManager.permissionState.collectAsStateWithLifecycle()
+    val availableChannels by locationManager.availableChannels.collectAsStateWithLifecycle()
+    val selectedChannel by locationManager.selectedChannel.collectAsStateWithLifecycle()
+    val locationNames by locationManager.locationNames.collectAsStateWithLifecycle()
+    val appLocationEnabled by locationManager.locationServicesEnabled.collectAsStateWithLifecycle()
+    val systemLocationEnabled by locationManager.systemLocationEnabled.collectAsStateWithLifecycle()
+    val locationServicesEnabled by locationManager.effectiveLocationEnabled.collectAsStateWithLifecycle()
 
     // Observe bookmarks state
-    val bookmarks by bookmarksStore.bookmarks.observeAsState(emptyList())
-    val bookmarkNames by bookmarksStore.bookmarkNames.observeAsState(emptyMap())
+    val bookmarks by bookmarksStore.bookmarks.collectAsStateWithLifecycle()
+    val bookmarkNames by bookmarksStore.bookmarkNames.collectAsStateWithLifecycle()
 
     // Observe reactive participant counts
-    val geohashParticipantCounts by viewModel.geohashParticipantCounts.observeAsState(emptyMap())
+    val geohashParticipantCounts by viewModel.geohashParticipantCounts.collectAsStateWithLifecycle()
 
     // UI state
     var customGeohash by remember { mutableStateOf("") }
@@ -112,43 +116,27 @@ fun LocationChannelsSheet(
     val standardBlue = Color(0xFF007AFF) // iOS blue
 
     if (isPresented) {
-        ModalBottomSheet(
-            modifier = modifier.statusBarsPadding(),
+        BitchatBottomSheet(
+            modifier = modifier,
             onDismissRequest = onDismiss,
             sheetState = sheetState,
-            containerColor = MaterialTheme.colorScheme.background,
-            dragHandle = null
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 48.dp, bottom = 16.dp)
+                    contentPadding = PaddingValues(top = 64.dp, bottom = 16.dp)
                 ) {
                     // Header Section
                     item(key = "header") {
-                        Column(
+                        Text(
+                            text = stringResource(R.string.location_channels_desc),
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
                             modifier = Modifier
-                                .fillMaxWidth()
                                 .padding(horizontal = 24.dp)
-                                .padding(bottom = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = stringResource(R.string.location_channels_title),
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-
-                            Text(
-                                text = stringResource(R.string.location_channels_desc),
-                                fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
-                            )
-                        }
+                        )
                     }
 
                     // Permission controls if services enabled
@@ -162,24 +150,7 @@ fun LocationChannelsSheet(
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 when (permissionState) {
-                                    LocationChannelManager.PermissionState.NOT_DETERMINED -> {
-                                        Button(
-                                            onClick = { locationManager.enableLocationChannels() },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = standardGreen.copy(alpha = 0.12f),
-                                                contentColor = standardGreen
-                                            ),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Text(
-                                                text = stringResource(R.string.grant_location_permission),
-                                                fontSize = 12.sp,
-                                                fontFamily = FontFamily.Monospace
-                                            )
-                                        }
-                                    }
-                                    LocationChannelManager.PermissionState.DENIED,
-                                    LocationChannelManager.PermissionState.RESTRICTED -> {
+                                    LocationChannelManager.PermissionState.DENIED -> {
                                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                             Text(
                                                 text = stringResource(R.string.location_permission_denied),
@@ -210,20 +181,6 @@ fun LocationChannelsSheet(
                                             fontFamily = FontFamily.Monospace,
                                             color = standardGreen
                                         )
-                                    }
-                                    null -> {
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            CircularProgressIndicator(modifier = Modifier.size(12.dp))
-                                            Text(
-                                                text = stringResource(R.string.checking_permissions),
-                                                fontSize = 11.sp,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                            )
-                                        }
                                     }
                                 }
                             }
@@ -286,10 +243,17 @@ fun LocationChannelsSheet(
                     } else if (permissionState == LocationChannelManager.PermissionState.AUTHORIZED && locationServicesEnabled) {
                         item {
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 32.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
                                 Text(
                                     text = stringResource(R.string.finding_nearby_channels),
                                     fontSize = 12.sp,
@@ -544,56 +508,45 @@ fun LocationChannelsSheet(
                 }
 
                 // TopBar (animated)
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .height(56.dp)
-                        .background(MaterialTheme.colorScheme.background.copy(alpha = topBarAlpha))
-                ) {
-                    TextButton(
-                        onClick = onDismiss,
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .padding(horizontal = 16.dp)
-                    ) {
-                        Text(
-                            text = stringResource(R.string.close_plain),
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onBackground
+                BitchatSheetTopBar(
+                    onClose = onDismiss,
+                    modifier = modifier.align(Alignment.TopCenter),
+                    title = {
+                        BitchatSheetTitle(
+                            text = stringResource(R.string.location_channels_title)
                         )
                     }
-                }
+                )
             }
         }
     }
 
-    // Lifecycle management: when presented, sample both nearby and bookmarked geohashes
+    // Lifecycle management: when presented, manage location updates
+    DisposableEffect(isPresented, permissionState, locationServicesEnabled) {
+        if (isPresented && permissionState == LocationChannelManager.PermissionState.AUTHORIZED && locationServicesEnabled) {
+            locationManager.refreshChannels()
+            locationManager.beginLiveRefresh()
+        }
+
+        onDispose {
+            locationManager.endLiveRefresh()
+        }
+    }
+
+    // Sampling management: update sampling when channels/bookmarks change
     LaunchedEffect(isPresented, availableChannels, bookmarks) {
         if (isPresented) {
-            if (permissionState == LocationChannelManager.PermissionState.AUTHORIZED && locationServicesEnabled) {
-                locationManager.refreshChannels()
-                locationManager.beginLiveRefresh()
-            }
             val geohashes = (availableChannels.map { it.geohash } + bookmarks).toSet().toList()
             viewModel.beginGeohashSampling(geohashes)
         } else {
-            locationManager.endLiveRefresh()
             viewModel.endGeohashSampling()
         }
     }
 
-    // React to permission changes
-    LaunchedEffect(permissionState) {
-        if (permissionState == LocationChannelManager.PermissionState.AUTHORIZED && locationServicesEnabled) {
-            locationManager.refreshChannels()
-        }
-    }
-
-    // React to location services enable/disable
-    LaunchedEffect(locationServicesEnabled) {
-        if (locationServicesEnabled && permissionState == LocationChannelManager.PermissionState.AUTHORIZED) {
-            locationManager.refreshChannels()
+    // Ensure cleanup when the composable is destroyed (e.g. removed from parent composition)
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.endGeohashSampling()
         }
     }
 }
@@ -712,7 +665,16 @@ private fun meshCount(viewModel: ChatViewModel): Int {
 @Composable
 private fun geohashTitleWithCount(channel: GeohashChannel, participantCount: Int): String {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    val peopleText = ctx.resources.getQuantityString(com.bitchat.android.R.plurals.people_count, participantCount, participantCount)
+    
+    // For high precision channels (Neighborhood, Block) where we don't broadcast presence,
+    // show "? people" instead of "0 people" to avoid misleading "nobody is here" indication.
+    val isHighPrecision = channel.level.precision > 5
+    val peopleText = if (isHighPrecision && participantCount == 0) {
+        ctx.resources.getQuantityString(com.bitchat.android.R.plurals.people_count, 0, 0).replace("0", "?")
+    } else {
+        ctx.resources.getQuantityString(com.bitchat.android.R.plurals.people_count, participantCount, participantCount)
+    }
+
     val levelName = when (channel.level) {
         com.bitchat.android.geohash.GeohashChannelLevel.BUILDING -> "Building" // iOS: precision 8 for location notes
         com.bitchat.android.geohash.GeohashChannelLevel.BLOCK -> stringResource(com.bitchat.android.R.string.location_level_block)
@@ -727,7 +689,15 @@ private fun geohashTitleWithCount(channel: GeohashChannel, participantCount: Int
 @Composable
 private fun geohashHashTitleWithCount(geohash: String, participantCount: Int): String {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    val peopleText = ctx.resources.getQuantityString(com.bitchat.android.R.plurals.people_count, participantCount, participantCount)
+    val level = levelForLength(geohash.length)
+    val isHighPrecision = level.precision > 5
+
+    val peopleText = if (isHighPrecision && participantCount == 0) {
+        ctx.resources.getQuantityString(com.bitchat.android.R.plurals.people_count, 0, 0).replace("0", "?")
+    } else {
+        ctx.resources.getQuantityString(com.bitchat.android.R.plurals.people_count, participantCount, participantCount)
+    }
+    
     return "#$geohash [$peopleText]"
 }
 

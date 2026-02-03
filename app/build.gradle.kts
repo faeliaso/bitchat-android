@@ -13,8 +13,8 @@ android {
         applicationId = "com.bitchat.droid"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 26
-        versionName = "1.5.1"
+        versionCode = 32
+        versionName = "1.7.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -30,6 +30,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                // Include x86_64 for emulator support during development
+                abiFilters += listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -39,6 +45,25 @@ android {
             )
         }
     }
+
+    // APK splits for GitHub releases - creates arm64, x86_64, and universal APKs
+    // AAB for Play Store handles architecture distribution automatically
+    // Auto-detects: splits enabled for assemble tasks, disabled for bundle tasks
+    // Works in Android Studio GUI and CLI without needing extra properties
+    val enableSplits = gradle.startParameter.taskNames.any { taskName ->
+        taskName.contains("assemble", ignoreCase = true) &&
+        !taskName.contains("bundle", ignoreCase = true)
+    }
+
+    splits {
+        abi {
+            isEnable = enableSplits
+            reset()
+            include("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+            isUniversalApk = true  // For F-Droid and fallback
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
@@ -73,12 +98,22 @@ dependencies {
     
     // Lifecycle
     implementation(libs.bundles.lifecycle)
+    implementation(libs.androidx.lifecycle.process)
     
     // Navigation
     implementation(libs.androidx.navigation.compose)
     
     // Permissions
     implementation(libs.accompanist.permissions)
+
+    // QR
+    implementation(libs.zxing.core)
+    implementation(libs.mlkit.barcode.scanning)
+
+    // CameraX
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.compose)
     
     // Cryptography
     implementation(libs.bundles.cryptography)
@@ -95,8 +130,11 @@ dependencies {
     // WebSocket
     implementation(libs.okhttp)
 
-    // Arti (Tor in Rust) Android bridge - use published AAR with native libs
-    implementation("info.guardianproject:arti-mobile-ex:1.2.3")
+    // Arti (Tor in Rust) Android bridge - custom build from latest source
+    // Built with rustls, 16KB page size support, and onio//un service client
+    // Native libraries are in src/tor/jniLibs/ (extracted from arti-custom.aar)
+    // Only included in tor flavor to reduce APK size for standard builds
+    // Note: AAR is kept in libs/ for reference, but libraries loaded from jniLibs/
 
     // Google Play Services Location
     implementation(libs.gms.location)

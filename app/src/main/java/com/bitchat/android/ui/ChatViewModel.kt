@@ -4,12 +4,17 @@ import android.app.Application
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.LiveData
 import androidx.lifecycle.viewModelScope
+import com.bitchat.android.favorites.FavoritesPersistenceService
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import com.bitchat.android.mesh.BluetoothMeshDelegate
 import com.bitchat.android.mesh.BluetoothMeshService
+import com.bitchat.android.service.MeshServiceHolder
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.BitchatMessageType
+import com.bitchat.android.nostr.NostrIdentityBridge
 import com.bitchat.android.protocol.BitchatPacket
 
 
@@ -19,6 +24,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Date
 import kotlin.random.Random
+import com.bitchat.android.services.VerificationService
+import com.bitchat.android.identity.SecureIdentityStateManager
+import com.bitchat.android.noise.NoiseSession
+import com.bitchat.android.nostr.GeohashAliasRegistry
+import com.bitchat.android.util.dataFromHexString
+import com.bitchat.android.util.hexEncodedString
+import java.security.MessageDigest
 
 /**
  * Refactored ChatViewModel - Main coordinator for bitchat functionality
@@ -26,8 +38,12 @@ import kotlin.random.Random
  */
 class ChatViewModel(
     application: Application,
-    val meshService: BluetoothMeshService
+    initialMeshService: BluetoothMeshService
 ) : AndroidViewModel(application), BluetoothMeshDelegate {
+
+    // Made var to support mesh service replacement after panic clear
+    var meshService: BluetoothMeshService = initialMeshService
+        private set
     private val debugManager by lazy { try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance() } catch (e: Exception) { null } }
 
     companion object {
@@ -46,8 +62,24 @@ class ChatViewModel(
         mediaSendingManager.sendImageNote(toPeerIDOrNull, channelOrNull, filePath)
     }
 
+    fun getCurrentNpub(): String? {
+        return try {
+            NostrIdentityBridge
+                .getCurrentNostrIdentity(getApplication())
+                ?.npub
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun buildMyQRString(nickname: String, npub: String?): String {
+        return VerificationService.buildMyQRString(nickname, npub) ?: ""
+    }
+
     // MARK: - State management
-    private val state = ChatState()
+    private val state = ChatState(
+        scope = viewModelScope,
+    )
 
     // Transfer progress tracking
     private val transferMessageMap = mutableMapOf<String, String>()
@@ -55,6 +87,7 @@ class ChatViewModel(
 
     // Specialized managers
     private val dataManager = DataManager(application.applicationContext)
+    private val identityManager by lazy { SecureIdentityStateManager(getApplication()) }
     private val messageManager = MessageManager(state)
     private val channelManager = ChannelManager(state, messageManager, dataManager, viewModelScope)
 
@@ -73,8 +106,19 @@ class ChatViewModel(
       NotificationIntervalManager()
     )
 
+    private val verificationHandler = VerificationHandler(
+        context = application.applicationContext,
+        scope = viewModelScope,
+        getMeshService = { meshService },
+        identityManager = identityManager,
+        state = state,
+        notificationManager = notificationManager,
+        messageManager = messageManager
+    )
+    val verifiedFingerprints = verificationHandler.verifiedFingerprints
+
     // Media file sending manager
-    private val mediaSendingManager = MediaSendingManager(state, messageManager, channelManager, meshService)
+    private val mediaSendingManager = MediaSendingManager(state, messageManager, channelManager) { meshService }
     
     // Delegate handler for mesh callbacks
     private val meshDelegateHandler = MeshDelegateHandler(
@@ -103,44 +147,82 @@ class ChatViewModel(
 
 
 
-    // Expose state through LiveData (maintaining the same interface)
-    val messages: LiveData<List<BitchatMessage>> = state.messages
-    val connectedPeers: LiveData<List<String>> = state.connectedPeers
-    val nickname: LiveData<String> = state.nickname
-    val isConnected: LiveData<Boolean> = state.isConnected
-    val privateChats: LiveData<Map<String, List<BitchatMessage>>> = state.privateChats
-    val selectedPrivateChatPeer: LiveData<String?> = state.selectedPrivateChatPeer
-    val unreadPrivateMessages: LiveData<Set<String>> = state.unreadPrivateMessages
-    val joinedChannels: LiveData<Set<String>> = state.joinedChannels
-    val currentChannel: LiveData<String?> = state.currentChannel
-    val channelMessages: LiveData<Map<String, List<BitchatMessage>>> = state.channelMessages
-    val unreadChannelMessages: LiveData<Map<String, Int>> = state.unreadChannelMessages
-    val passwordProtectedChannels: LiveData<Set<String>> = state.passwordProtectedChannels
-    val showPasswordPrompt: LiveData<Boolean> = state.showPasswordPrompt
-    val passwordPromptChannel: LiveData<String?> = state.passwordPromptChannel
-    val showSidebar: LiveData<Boolean> = state.showSidebar
+
+    val messages: StateFlow<List<BitchatMessage>> = state.messages
+    val connectedPeers: StateFlow<List<String>> = state.connectedPeers
+    val nickname: StateFlow<String> = state.nickname
+    val isConnected: StateFlow<Boolean> = state.isConnected
+    val privateChats: StateFlow<Map<String, List<BitchatMessage>>> = state.privateChats
+    val selectedPrivateChatPeer: StateFlow<String?> = state.selectedPrivateChatPeer
+    val unreadPrivateMessages: StateFlow<Set<String>> = state.unreadPrivateMessages
+    val joinedChannels: StateFlow<Set<String>> = state.joinedChannels
+    val currentChannel: StateFlow<String?> = state.currentChannel
+    val channelMessages: StateFlow<Map<String, List<BitchatMessage>>> = state.channelMessages
+    val unreadChannelMessages: StateFlow<Map<String, Int>> = state.unreadChannelMessages
+    val passwordProtectedChannels: StateFlow<Set<String>> = state.passwordProtectedChannels
+    val showPasswordPrompt: StateFlow<Boolean> = state.showPasswordPrompt
+    val passwordPromptChannel: StateFlow<String?> = state.passwordPromptChannel
     val hasUnreadChannels = state.hasUnreadChannels
     val hasUnreadPrivateMessages = state.hasUnreadPrivateMessages
-    val showCommandSuggestions: LiveData<Boolean> = state.showCommandSuggestions
-    val commandSuggestions: LiveData<List<CommandSuggestion>> = state.commandSuggestions
-    val showMentionSuggestions: LiveData<Boolean> = state.showMentionSuggestions
-    val mentionSuggestions: LiveData<List<String>> = state.mentionSuggestions
-    val favoritePeers: LiveData<Set<String>> = state.favoritePeers
-    val peerSessionStates: LiveData<Map<String, String>> = state.peerSessionStates
-    val peerFingerprints: LiveData<Map<String, String>> = state.peerFingerprints
-    val peerNicknames: LiveData<Map<String, String>> = state.peerNicknames
-    val peerRSSI: LiveData<Map<String, Int>> = state.peerRSSI
-    val peerDirect: LiveData<Map<String, Boolean>> = state.peerDirect
-    val showAppInfo: LiveData<Boolean> = state.showAppInfo
-    val selectedLocationChannel: LiveData<com.bitchat.android.geohash.ChannelID?> = state.selectedLocationChannel
-    val isTeleported: LiveData<Boolean> = state.isTeleported
-    val geohashPeople: LiveData<List<GeoPerson>> = state.geohashPeople
-    val teleportedGeo: LiveData<Set<String>> = state.teleportedGeo
-    val geohashParticipantCounts: LiveData<Map<String, Int>> = state.geohashParticipantCounts
+    val showCommandSuggestions: StateFlow<Boolean> = state.showCommandSuggestions
+    val commandSuggestions: StateFlow<List<CommandSuggestion>> = state.commandSuggestions
+    val showMentionSuggestions: StateFlow<Boolean> = state.showMentionSuggestions
+    val mentionSuggestions: StateFlow<List<String>> = state.mentionSuggestions
+    val favoritePeers: StateFlow<Set<String>> = state.favoritePeers
+    val peerSessionStates: StateFlow<Map<String, String>> = state.peerSessionStates
+    val peerFingerprints: StateFlow<Map<String, String>> = state.peerFingerprints
+    val peerNicknames: StateFlow<Map<String, String>> = state.peerNicknames
+    val peerRSSI: StateFlow<Map<String, Int>> = state.peerRSSI
+    val peerDirect: StateFlow<Map<String, Boolean>> = state.peerDirect
+    val showAppInfo: StateFlow<Boolean> = state.showAppInfo
+    val showMeshPeerList: StateFlow<Boolean> = state.showMeshPeerList
+    val privateChatSheetPeer: StateFlow<String?> = state.privateChatSheetPeer
+    val showVerificationSheet: StateFlow<Boolean> = state.showVerificationSheet
+    val showSecurityVerificationSheet: StateFlow<Boolean> = state.showSecurityVerificationSheet
+    val selectedLocationChannel: StateFlow<com.bitchat.android.geohash.ChannelID?> = state.selectedLocationChannel
+    val isTeleported: StateFlow<Boolean> = state.isTeleported
+    val geohashPeople: StateFlow<List<GeoPerson>> = state.geohashPeople
+    val teleportedGeo: StateFlow<Set<String>> = state.teleportedGeo
+    val geohashParticipantCounts: StateFlow<Map<String, Int>> = state.geohashParticipantCounts
 
     init {
         // Note: Mesh service delegate is now set by MainActivity
         loadAndInitialize()
+        // Hydrate UI state from process-wide AppStateStore to survive Activity recreation
+        viewModelScope.launch {
+            try { com.bitchat.android.services.AppStateStore.peers.collect { peers ->
+                state.setConnectedPeers(peers)
+                state.setIsConnected(peers.isNotEmpty())
+            } } catch (_: Exception) { }
+        }
+        viewModelScope.launch {
+            try { com.bitchat.android.services.AppStateStore.publicMessages.collect { msgs ->
+                // Source of truth is AppStateStore; replace to avoid duplicate keys in LazyColumn
+                state.setMessages(msgs)
+            } } catch (_: Exception) { }
+        }
+        viewModelScope.launch {
+            try { com.bitchat.android.services.AppStateStore.privateMessages.collect { byPeer ->
+                // Replace with store snapshot
+                state.setPrivateChats(byPeer)
+                // Recompute unread set using SeenMessageStore for robustness across Activity recreation
+                try {
+                    val seen = com.bitchat.android.services.SeenMessageStore.getInstance(getApplication())
+                    val myNick = state.getNicknameValue() ?: meshService.myPeerID
+                    val unread = mutableSetOf<String>()
+                    byPeer.forEach { (peer, list) ->
+                        if (list.any { msg -> msg.sender != myNick && !seen.hasRead(msg.id) }) unread.add(peer)
+                    }
+                    state.setUnreadPrivateMessages(unread)
+                } catch (_: Exception) { }
+            } } catch (_: Exception) { }
+        }
+        viewModelScope.launch {
+            try { com.bitchat.android.services.AppStateStore.channelMessages.collect { byChannel ->
+                // Replace with store snapshot
+                state.setChannelMessages(byChannel)
+            } } catch (_: Exception) { }
+        }
         // Subscribe to BLE transfer progress and reflect in message deliveryStatus
         viewModelScope.launch {
             com.bitchat.android.mesh.TransferProgressManager.events.collect { evt ->
@@ -209,6 +291,9 @@ class ChatViewModel(
 
         // Initialize favorites persistence service
         com.bitchat.android.favorites.FavoritesPersistenceService.initialize(getApplication())
+
+        // Load verified fingerprints from secure storage
+        verificationHandler.loadVerifiedFingerprints()
 
 
         // Ensure NostrTransport knows our mesh peer ID for embedded packets
@@ -324,6 +409,8 @@ class ChatViewModel(
         setCurrentPrivateChatPeer(null)
         // Clear mesh mention notifications since user is now back in mesh chat
         clearMeshMentionNotifications()
+        // Ensure sheet is hidden
+        hidePrivateChatSheet()
     }
 
     // MARK: - Open Latest Unread Private Chat
@@ -372,12 +459,7 @@ class ChatViewModel(
                 canonical ?: targetKey
             }
 
-            startPrivateChat(openPeer)
-
-            // If sidebar visible, hide it to focus on the private chat
-            if (state.getShowSidebarValue()) {
-                state.setShowSidebar(false)
-            }
+            showPrivateChatSheet(openPeer)
         } catch (e: Exception) {
             Log.w(TAG, "openLatestUnreadPrivateChat failed: ${e.message}")
         }
@@ -430,6 +512,10 @@ class ChatViewModel(
             ).also { canonical ->
                 if (canonical != state.getSelectedPrivateChatPeerValue()) {
                     privateChatManager.startPrivateChat(canonical, meshService)
+                    // If we're in the private chat sheet, update its active peer too
+                    if (state.getPrivateChatSheetPeerValue() != null) {
+                        showPrivateChatSheet(canonical)
+                    }
                 }
             }
             // Send private message
@@ -565,7 +651,7 @@ class ChatViewModel(
     
     private fun logCurrentFavoriteState() {
         Log.i("ChatViewModel", "=== CURRENT FAVORITE STATE ===")
-        Log.i("ChatViewModel", "LiveData favorite peers: ${favoritePeers.value}")
+        Log.i("ChatViewModel", "StateFlow favorite peers: ${favoritePeers.value}")
         Log.i("ChatViewModel", "DataManager favorite peers: ${dataManager.favoritePeers}")
         Log.i("ChatViewModel", "Peer fingerprints: ${privateChatManager.getAllPeerFingerprints()}")
         Log.i("ChatViewModel", "==============================")
@@ -609,6 +695,18 @@ class ChatViewModel(
         // Update fingerprint mappings from centralized manager
         val fingerprints = privateChatManager.getAllPeerFingerprints()
         state.setPeerFingerprints(fingerprints)
+        fingerprints.forEach { (peerID, fingerprint) ->
+            identityManager.cachePeerFingerprint(peerID, fingerprint)
+            val info = try { meshService.getPeerInfo(peerID) } catch (_: Exception) { null }
+            val noiseKeyHex = info?.noisePublicKey?.hexEncodedString()
+            if (noiseKeyHex != null) {
+                identityManager.cachePeerNoiseKey(peerID, noiseKeyHex)
+                identityManager.cacheNoiseFingerprint(noiseKeyHex, fingerprint)
+            }
+            info?.nickname?.takeIf { it.isNotBlank() }?.let { nickname ->
+                identityManager.cacheFingerprintNickname(fingerprint, nickname)
+            }
+        }
 
         val nicknames = meshService.getPeerNicknames()
         state.setPeerNicknames(nicknames)
@@ -623,6 +721,34 @@ class ChatViewModel(
             }
             state.setPeerDirect(directMap)
         } catch (_: Exception) { }
+
+        // Flush any pending QR verification once a Noise session is established
+        currentPeers.forEach { peerID ->
+            if (meshService.getSessionState(peerID) is NoiseSession.NoiseSessionState.Established) {
+                verificationHandler.sendPendingVerificationIfNeeded(peerID)
+            }
+        }
+    }
+
+    // MARK: - QR Verification
+    
+    fun isPeerVerified(peerID: String, verifiedFingerprints: Set<String>): Boolean {
+        if (peerID.startsWith("nostr_") || peerID.startsWith("nostr:")) return false
+        val fingerprint = verificationHandler.getPeerFingerprintForDisplay(peerID)
+        return fingerprint != null && verifiedFingerprints.contains(fingerprint)
+    }
+
+    fun isNoisePublicKeyVerified(noisePublicKey: ByteArray, verifiedFingerprints: Set<String>): Boolean {
+        val fingerprint = verificationHandler.fingerprintFromNoiseBytes(noisePublicKey)
+        return verifiedFingerprints.contains(fingerprint)
+    }
+
+    fun unverifyFingerprint(peerID: String) {
+        verificationHandler.unverifyFingerprint(peerID)
+    }
+
+    fun beginQRVerification(qr: VerificationService.VerificationQR): Boolean {
+        return verificationHandler.beginQRVerification(qr)
     }
 
     // MARK: - Debug and Troubleshooting
@@ -631,39 +757,85 @@ class ChatViewModel(
         return meshService.getDebugStatus()
     }
     
-    // Note: Mesh service restart is now handled by MainActivity
-    // This function is no longer needed
-    
-    fun setAppBackgroundState(inBackground: Boolean) {
-        // Forward to notification manager for notification logic
-        notificationManager.setAppBackgroundState(inBackground)
-    }
-    
     fun setCurrentPrivateChatPeer(peerID: String?) {
-        // Update notification manager with current private chat peer
         notificationManager.setCurrentPrivateChatPeer(peerID)
     }
     
     fun setCurrentGeohash(geohash: String?) {
-        // Update notification manager with current geohash for notification logic
         notificationManager.setCurrentGeohash(geohash)
     }
 
     fun clearNotificationsForSender(peerID: String) {
-        // Clear notifications when user opens a chat
         notificationManager.clearNotificationsForSender(peerID)
     }
     
     fun clearNotificationsForGeohash(geohash: String) {
-        // Clear notifications when user opens a geohash chat
         notificationManager.clearNotificationsForGeohash(geohash)
     }
 
-    /**
-     * Clear mesh mention notifications when user opens mesh chat
-     */
     fun clearMeshMentionNotifications() {
         notificationManager.clearMeshMentionNotifications()
+    }
+
+    private var reopenSidebarAfterVerification = false
+
+    fun showVerificationSheet(fromSidebar: Boolean = false) {
+        if (fromSidebar) {
+            reopenSidebarAfterVerification = true
+        }
+        state.setShowVerificationSheet(true)
+    }
+
+    fun hideVerificationSheet() {
+        state.setShowVerificationSheet(false)
+        if (reopenSidebarAfterVerification) {
+            reopenSidebarAfterVerification = false
+            state.setShowMeshPeerList(true)
+        }
+    }
+
+    fun showSecurityVerificationSheet() {
+        state.setShowSecurityVerificationSheet(true)
+    }
+
+    fun hideSecurityVerificationSheet() {
+        state.setShowSecurityVerificationSheet(false)
+    }
+
+    fun showMeshPeerList() {
+        state.setShowMeshPeerList(true)
+    }
+
+    fun hideMeshPeerList() {
+        state.setShowMeshPeerList(false)
+    }
+
+    fun showPrivateChatSheet(peerID: String) {
+        state.setPrivateChatSheetPeer(peerID)
+    }
+
+    fun hidePrivateChatSheet() {
+        state.setPrivateChatSheetPeer(null)
+    }
+
+    fun getPeerFingerprintForDisplay(peerID: String): String? {
+        return verificationHandler.getPeerFingerprintForDisplay(peerID)
+    }
+
+    fun getMyFingerprint(): String {
+        return verificationHandler.getMyFingerprint()
+    }
+
+    fun resolvePeerDisplayNameForFingerprint(peerID: String): String {
+        return verificationHandler.resolvePeerDisplayNameForFingerprint(peerID)
+    }
+
+    fun verifyFingerprintValue(fingerprint: String) {
+        verificationHandler.verifyFingerprintValue(fingerprint)
+    }
+
+    fun unverifyFingerprintValue(fingerprint: String) {
+        verificationHandler.unverifyFingerprintValue(fingerprint)
     }
 
     // MARK: - Command Autocomplete (delegated)
@@ -707,6 +879,14 @@ class ChatViewModel(
     override fun didReceiveReadReceipt(messageID: String, recipientPeerID: String) {
         meshDelegateHandler.didReceiveReadReceipt(messageID, recipientPeerID)
     }
+
+    override fun didReceiveVerifyChallenge(peerID: String, payload: ByteArray, timestampMs: Long) {
+        verificationHandler.didReceiveVerifyChallenge(peerID, payload)
+    }
+
+    override fun didReceiveVerifyResponse(peerID: String, payload: ByteArray, timestampMs: Long) {
+        verificationHandler.didReceiveVerifyResponse(peerID, payload)
+    }
     
     override fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? {
         return meshDelegateHandler.decryptChannelMessage(encryptedContent, channel)
@@ -733,6 +913,11 @@ class ChatViewModel(
         privateChatManager.clearAllPrivateChats()
         dataManager.clearAllData()
         
+        // Clear seen message store
+        try {
+            com.bitchat.android.services.SeenMessageStore.getInstance(getApplication()).clear()
+        } catch (_: Exception) { }
+        
         // Clear all mesh service data
         clearAllMeshServiceData()
         
@@ -741,6 +926,9 @@ class ChatViewModel(
         
         // Clear all notifications
         notificationManager.clearAllNotifications()
+
+        // Clear all media files
+        com.bitchat.android.features.file.FileUtils.clearAllMedia(getApplication())
         
         // Clear Nostr/geohash state, keys, connections, bookmarks, and reinitialize from scratch
         try {
@@ -760,10 +948,37 @@ class ChatViewModel(
         state.setNickname(newNickname)
         dataManager.saveNickname(newNickname)
         
-        Log.w(TAG, "🚨 PANIC MODE COMPLETED - All sensitive data cleared")
-        
-        // Note: Mesh service restart is now handled by MainActivity
-        // This method now only clears data, not mesh service lifecycle
+        // Recreate mesh service with fresh identity
+        recreateMeshServiceAfterPanic()
+
+        Log.w(TAG, "🚨 PANIC MODE COMPLETED - New identity: ${meshService.myPeerID}")
+    }
+
+    /**
+     * Recreate the mesh service with a fresh identity after panic clear.
+     * This ensures the new cryptographic keys are used for a new peer ID.
+     */
+    private fun recreateMeshServiceAfterPanic() {
+        val oldPeerID = meshService.myPeerID
+
+        // Clear the holder so getOrCreate() returns a fresh instance
+        MeshServiceHolder.clear()
+
+        // Create fresh mesh service with new identity (keys were regenerated in clearAllCryptographicData)
+        val freshMeshService = MeshServiceHolder.getOrCreate(getApplication())
+
+        // Replace our reference and set up the new service
+        meshService = freshMeshService
+        meshService.delegate = this
+
+        // Restart mesh operations with new identity
+        meshService.startServices()
+        meshService.sendBroadcastAnnounce()
+
+        Log.d(
+            TAG,
+            "✅ Mesh service recreated. Old peerID: $oldPeerID, New peerID: ${meshService.myPeerID}"
+        )
     }
     
     /**
@@ -790,7 +1005,7 @@ class ChatViewModel(
             
             // Clear secure identity state (if used)
             try {
-                val identityManager = com.bitchat.android.identity.SecureIdentityStateManager(getApplication())
+                val identityManager = SecureIdentityStateManager(getApplication())
                 identityManager.clearIdentityData()
                 // Also clear secure values used by FavoritesPersistenceService (favorites + peerID index)
                 try {
@@ -803,7 +1018,7 @@ class ChatViewModel(
 
             // Clear FavoritesPersistenceService persistent relationships
             try {
-                com.bitchat.android.favorites.FavoritesPersistenceService.shared.clearAllFavorites()
+                FavoritesPersistenceService.shared.clearAllFavorites()
                 Log.d(TAG, "✅ Cleared FavoritesPersistenceService relationships")
             } catch (_: Exception) { }
             
@@ -831,7 +1046,7 @@ class ChatViewModel(
      * End geohash sampling
      */
     fun endGeohashSampling() {
-        // No-op in refactored architecture; sampling subscriptions are short-lived
+        geohashViewModel.endGeohashSampling()
     }
 
     /**
@@ -846,7 +1061,7 @@ class ChatViewModel(
      */
     fun startGeohashDM(pubkeyHex: String) {
         geohashViewModel.startGeohashDM(pubkeyHex) { convKey ->
-            startPrivateChat(convKey)
+            showPrivateChatSheet(convKey)
         }
     }
 
@@ -870,15 +1085,7 @@ class ChatViewModel(
     fun hideAppInfo() {
         state.setShowAppInfo(false)
     }
-    
-    fun showSidebar() {
-        state.setShowSidebar(true)
-    }
-    
-    fun hideSidebar() {
-        state.setShowSidebar(false)
-    }
-    
+
     /**
      * Handle Android back navigation
      * Returns true if the back press was handled, false if it should be passed to the system
@@ -890,11 +1097,6 @@ class ChatViewModel(
                 hideAppInfo()
                 true
             }
-            // Close sidebar
-            state.getShowSidebarValue() -> {
-                hideSidebar()
-                true
-            }
             // Close password dialog
             state.getShowPasswordPromptValue() -> {
                 state.setShowPasswordPrompt(false)
@@ -902,7 +1104,7 @@ class ChatViewModel(
                 true
             }
             // Exit private chat
-            state.getSelectedPrivateChatPeerValue() != null -> {
+            state.getSelectedPrivateChatPeerValue() != null || state.getPrivateChatSheetPeerValue() != null -> {
                 endPrivateChat()
                 true
             }
@@ -932,5 +1134,6 @@ class ChatViewModel(
      */
     fun colorForNostrPubkey(pubkeyHex: String, isDark: Boolean): androidx.compose.ui.graphics.Color {
         return geohashViewModel.colorForNostrPubkey(pubkeyHex, isDark)
-    }
+}
+
 }
